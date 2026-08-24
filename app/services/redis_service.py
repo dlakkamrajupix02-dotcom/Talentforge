@@ -25,13 +25,19 @@ class _BaseRedisClient:
         # return # Minimal line to override Redis
         if self.is_available():
             return
+        url = str(settings.redis_url or "").strip()
+        if not url or not url.startswith(("redis://", "rediss://", "unix://")):
+            logger.info(f"No valid Redis URL configured for {self._service_name}. Operating with in-memory fallback.")
+            self.redis_client = None
+            return
+
         try:
             # Use max_connections=50 to handle high concurrent load (1000 users target)
-            self.redis_client = redis_async.from_url(settings.redis_url,decode_responses=True,socket_connect_timeout=5,socket_timeout=5,max_connections=50)
+            self.redis_client = redis_async.from_url(url, decode_responses=True, socket_connect_timeout=3, socket_timeout=3, max_connections=50)
             await self.redis_client.ping()
             logger.info(f"{self._service_name} connection established successfully (Prefix: {settings.redis_key_prefix})")
         except Exception as e:
-            logger.error(f"Failed to connect to {self._service_name}: {e}")
+            logger.warning(f"Failed to connect to {self._service_name}: {e}. Operating with in-memory fallback.")
             self.redis_client = None
 
     def _get_key(self, key: str) -> str:
