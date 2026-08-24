@@ -1,0 +1,67 @@
+  const handleUpdateSection = async (sectionName, newVal) => {
+    try {
+      const color = user?.color_code || "#6366f1";
+      const name = user?.full_name || "Reviewer";
+      
+      // Improve field lookup: check content first, then top level, with fallback to empty array
+      const currentVal = jd.content?.[sectionName] || jd[sectionName] || [];
+      let highlightedVal = newVal;
+
+      if (Array.isArray(newVal)) {
+        highlightedVal = newVal.map(item => {
+          const isObj = typeof item === 'object' && item !== null;
+          if (!isObj) return item; // Handle string arrays separately if needed
+
+          // Clean version of the item we are trying to save
+          const cleanItemTitle = stripHighlightTags(item.title || item.point || "").trim();
+          if (!cleanItemTitle) return null; // Skip empty items
+
+          // Check if this item already exists in the current JD to avoid redundant/nested highlights
+          const exists = Array.isArray(currentVal) && currentVal.some(curr => {
+            const isCurrObj = typeof curr === 'object' && curr !== null;
+            const cleanCurrTitle = stripHighlightTags(isCurrObj ? (curr.title || curr.point || "") : curr).trim();
+            return cleanCurrTitle === cleanItemTitle && cleanCurrTitle !== "";
+          });
+
+          // Create the object to send back
+          const newItem = { ...item };
+          const highlightWrap = (text) => `[[mod:${color}:${name}]]${stripHighlightTags(text)}[[/mod]]`;
+
+          if (!exists) {
+            // Apply new highlights
+            if (newItem.title !== undefined) newItem.title = highlightWrap(newItem.title);
+            if (newItem.description !== undefined && newItem.description) {
+              newItem.description = highlightWrap(newItem.description);
+            }
+            // For modified items, point MUST be highlighted
+            newItem.point = highlightWrap(newItem.point || newItem.title || "");
+          } else {
+            // For EXISTING items, we MUST still ensure the 'point' field is present and correct
+            // because normalizeComplexList might have moved it to 'title'.
+            // The backend depends on 'point' to recognize the item.
+            if (newItem.point === undefined || newItem.point === "") {
+              newItem.point = newItem.title || "";
+            }
+          }
+          
+          return newItem;
+        }).filter(Boolean);
+      } else if (typeof newVal === 'string') {
+        const cleanOld = stripHighlightTags(Array.isArray(currentVal) ? "" : (currentVal || ""));
+        const cleanNew = stripHighlightTags(newVal);
+        if (cleanNew !== cleanOld && cleanNew.trim() !== "") {
+          highlightedVal = `[[mod:${color}:${name}]]${newVal}[[/mod]]`;
+        }
+      }
+
+      await jdService.updateSection(jd.id, sectionName, highlightedVal);
+      // Refresh details to sync
+      const updated = await jdService.getJDById(id);
+      if (updated) setFullDetails(updated);
+      setEditingSection(null);
+      toast.success(`${sectionName} updated`);
+    } catch (error) {
+       console.error(`Failed to update section ${sectionName}:`, error);
+       toast.error(`Could not save ${sectionName}`);
+    }
+  };

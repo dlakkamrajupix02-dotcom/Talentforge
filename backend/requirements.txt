@@ -1,0 +1,73 @@
+# Core FastAPI and ASGI
+fastapi==0.135.1
+uvicorn[standard]==0.24.0
+websockets==12.0
+starlette==0.52.1
+
+# Database
+SQLAlchemy==2.0.48
+asyncpg==0.30.0
+alembic==1.18.4
+psycopg2-binary==2.9.11
+
+# Authentication & Security
+python-jose[cryptography]==3.4.0
+passlib[bcrypt]==1.7.4
+bcrypt==5.0.0
+cryptography==46.0.4
+
+# Data Validation & Serialization
+pydantic[email]==2.12.5
+pydantic-settings==2.1.0
+email-validator==2.2.0
+python-multipart==0.0.20
+
+# Caching & Storage
+redis==7.1.0
+
+# HTTP Client & Networking
+httpx==0.28.1
+requests==2.32.5
+
+# Retry & Resilience
+tenacity==9.1.2
+
+# PDF generation, export, and deterministic document ingestion
+reportlab==4.0.7
+python-docx==1.1.2
+pypdf
+pdfplumber>=0.11.0,<0.11.6
+beautifulsoup4>=4.12.0
+striprtf>=0.0.26
+chardet>=5.2.0,<6.0.0
+olefile>=0.47
+
+# AI - NVIDIA NIM
+openai>=1.30.0
+groq>=0.9.0
+mistralai
+langchain-core
+langchain-mistralai
+
+# JSON Processing
+json-repair==0.25.0
+
+# Development & Testing
+pytest==9.0.2
+pytest-asyncio==1.3.0
+
+# Configuration & Environment
+python-dotenv==1.2.1
+
+# Utilities
+slowapi==0.1.9
+loguru==0.7.3
+aiofiles
+
+# Excel Processing
+pandas==2.2.3
+openpyxl==3.1.5
+
+# Optional: local GeoIP
+geoip2
+cachetools
