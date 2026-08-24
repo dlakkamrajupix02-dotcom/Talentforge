@@ -1,20 +1,48 @@
-# Environment and secrets
+# Environment and secrets — never commit
 .env
 .env.*
 !.env.example
 
-# Dependencies
-node_modules/
+# Local uploads (served via authenticated routes, not git)
+private/uploads/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 .venv/
 venv/
-
-# Build outputs
+env/
+ENV/
+*.egg-info/
+.eggs/
 dist/
 build/
-*.py[cod]
-__pycache__/
+*.egg
 
-# Logs
-*.log
-logs/
+# Testing / tooling
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Logs and runtime artifacts
+logs/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Database (local dev only)
+*.db
+*.sqlite3
