@@ -19,8 +19,6 @@ from app.models.models import Base
 
 logger = get_logger()
 
-# Exceptions that are expected user-input mistakes — should never be logged
-# as DB errors or trigger the circuit breaker.
 _EXPECTED_REQUEST_ERRORS: tuple[type[BaseException], ...] = (RequestValidationError, HTTPException, ApplicationError)
 
 _USER_CAUSED_OP_KEYWORDS = (
@@ -36,17 +34,17 @@ _USER_CAUSED_OP_KEYWORDS = (
 
 
 class CircuitState(str, Enum):
-    CLOSED = "closed"  # Normal-> Requests allowed
-    OPEN = "open"      # Failure-> Requests blocked, waiting for reset_timeout
-    HALF_OPEN = "half_open" # Probing-> Allow limited requests to test if DB has recovered
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
 
 
 class DBCircuitBreaker:
     def __init__(self,enabled: bool = True,failure_threshold: int = 25, reset_timeout: int = 30,success_threshold: int = 2):
         self.enabled = enabled
-        self.failure_threshold = failure_threshold  # 25 infra failures → open circuit.
-        self.reset_timeout = reset_timeout          # 30s after opening, allow a probe request to test recovery.
-        self.success_threshold = success_threshold  # 2 consecutive successes in HALF_OPEN → close circuit again.
+        self.failure_threshold = failure_threshold
+        self.reset_timeout = reset_timeout
+        self.success_threshold = success_threshold
         self.state = CircuitState.CLOSED
         self.consecutive_failures = 0
         self.success_count = 0
@@ -69,28 +67,25 @@ class DBCircuitBreaker:
 
         try:
             import asyncpg
-
             if isinstance(exc, (asyncpg.PostgresConnectionError,asyncpg.TooManyConnectionsError,asyncpg.CannotConnectNowError)):
                 return True
         except ImportError:
             pass
 
-        logger.debug(f"DB circuit: {type(exc).__name__} not treated as infra failure")
         return False
 
     def _should_attempt(self) -> bool:
-        if not self.enabled:
-            return True
         if self.state == CircuitState.CLOSED:
             return True
         if self.state == CircuitState.OPEN:
-            elapsed = time.time() - self.last_failure_time
-            if elapsed >= self.reset_timeout:
+            if time.time() - self.last_failure_time >= self.reset_timeout:
                 self.state = CircuitState.HALF_OPEN
                 self.success_count = 0
-                logger.info(f"DB circuit HALF_OPEN after {elapsed:.1f}s — probe allowed")
+                logger.info(f"DB circuit HALF_OPEN — testing recovery with probe query")
                 return True
             return False
+        if self.state == CircuitState.HALF_OPEN:
+            return True
         return True
 
     def record_success(self) -> None:
@@ -140,29 +135,44 @@ class DBCircuitBreaker:
 raw_url = settings.database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 DATABASE_URL = raw_url.split("?")[0]
 
-async_engine = create_async_engine(DATABASE_URL,pool_size=20,max_overflow=30,pool_timeout=30,pool_recycle=3600,
-    pool_pre_ping=True,echo=False,future=True,
-    connect_args={
-        "command_timeout": 60,
-        "server_settings": {
-            "application_name": "talentforge_backend",
-            "jit": "off",
-        }})
+connect_args: dict[str, Any] = {
+    "command_timeout": 60,
+    "server_settings": {
+        "application_name": "talentforge_backend",
+        "jit": "off",
+    }
+}
 
-AsyncSessionLocal = async_sessionmaker(bind=async_engine,class_=AsyncSession,expire_on_commit=False,autoflush=False)
+# Automatically enable SSL for cloud-hosted databases (Neon, AWS RDS, Supabase, etc.)
+if "sslmode=require" in settings.database_url or "ssl=require" in settings.database_url or "neon.tech" in settings.database_url:
+    connect_args["ssl"] = "require"
+
+async_engine = create_async_engine(
+    DATABASE_URL,
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=30,
+    pool_recycle=3600,
+    pool_pre_ping=True,
+    echo=False,
+    future=True,
+    connect_args=connect_args
+)
+
+AsyncSessionLocal = async_sessionmaker(bind=async_engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
 
 RETRYABLE_DB_EXCEPTIONS = (OperationalError, InterfaceError, SATimeoutError, OSError)
 
-db_circuit = DBCircuitBreaker(enabled=settings.db_circuit_enabled,failure_threshold=settings.db_circuit_failure_threshold,
-    reset_timeout=settings.db_circuit_reset_seconds,success_threshold=settings.db_circuit_success_threshold)
+db_circuit = DBCircuitBreaker(
+    enabled=settings.db_circuit_enabled,
+    failure_threshold=settings.db_circuit_failure_threshold,
+    reset_timeout=settings.db_circuit_reset_seconds,
+    success_threshold=settings.db_circuit_success_threshold
+)
 
 
 @asynccontextmanager
 async def get_db_with_retry():
-    """
-    Acquire a session from AsyncSessionLocal .
-    Refuses new work when the circuit is open.
-    """
     if db_circuit.is_open():
         raise RuntimeError("Database temporarily unavailable (circuit open). Retry shortly.")
 
@@ -178,17 +188,11 @@ async def get_db_with_retry():
         db_circuit.record_failure(exc)
         raise
     except _EXPECTED_REQUEST_ERRORS:
-        # Validation / HTTP errors are expected user-input mistakes, not DB failures.
-        # Roll back silently and re-raise so the exception handlers in main.py can
-        # format a clean response — no traceback, no circuit-breaker hit.
-        if session:
-            await session.rollback()
         raise
     except Exception as exc:
         if session:
             await session.rollback()
-        log_exception_one_line("Database operation failed", exc)
-        db_circuit.record_failure(exc)
+        logger.warning(f"Non-retryable DB error: {exc}")
         raise
     finally:
         if session:
@@ -196,48 +200,32 @@ async def get_db_with_retry():
 
 
 async def get_db():
-    """FastAPI dependency — one session per request from ``AsyncSessionLocal``."""
     async with get_db_with_retry() as session:
         yield session
 
-@retry(stop=stop_after_attempt(settings.db_max_retries),wait=wait_exponential(multiplier=settings.db_retry_delay,
-        max=settings.db_retry_max_delay,),retry=retry_if_exception_type(RETRYABLE_DB_EXCEPTIONS),
-    before_sleep=before_sleep_log(logger, logging.WARNING),reraise=True)
-async def init_db():
-    """DDL via engine.begin(); ensures via ``AsyncSessionLocal`` (same as ``get_db``)."""
-    if not settings.enable_db_create_all:
-        logger.info("Skipping Base.metadata.create_all (ENABLE_DB_CREATE_ALL=false)")
-        return
-    try:
-        async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
 
-    except RETRYABLE_DB_EXCEPTIONS:
-        logger.warning("Transient DB error during init — retrying…")
-        raise
-    except Exception as e:
-        log_exception_one_line("Database initialization failed (non-retryable)", e)
-        raise  
-
-async def close_db():
-    try:
-        await async_engine.dispose()
-        logger.info("Database connection pool closed")
-    except Exception as e:
-        logger.error(f"Error closing database connection pool: {e}")
-
-async def health_check_db() -> bool:
-    """Probe DB using ``AsyncSessionLocal`` — same factory as ``get_db``, same pool."""
+async def health_check_db() -> tuple[bool, str]:
     if db_circuit.is_open():
-        logger.warning("DB health check skipped — DB circuit is open")
-        return False
+        return False, "Circuit breaker OPEN"
     try:
-        async with AsyncSessionLocal() as session:
-            await session.execute(select(1))
-        return True
-    except Exception as e:
-        logger.warning(f"DB health check failed: {e}")
-        return False
+        async with get_db_with_retry() as session:
+            result = await session.execute(select(1))
+            scalar = result.scalar()
+            if scalar == 1:
+                return True, "healthy"
+            return False, f"unexpected response: {scalar}"
+    except Exception as exc:
+        return False, f"connection failed: {str(exc)}"
+
 
 def get_db_circuit_stats() -> dict[str, Any]:
     return db_circuit.get_stats()
+
+
+async def init_db():
+    async with async_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def close_db():
+    await async_engine.dispose()
