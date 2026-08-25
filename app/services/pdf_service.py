@@ -27,6 +27,47 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
 logger = get_logger()
 
+
+def _resolve_export_logo_source(image_url: str) -> tuple[str | None, io.BytesIO | None]:
+    """Return (filesystem_path, bytes_buffer) for export renderers."""
+    from app.core.file_storage import resolve_image_path_for_export
+
+    if not image_url:
+        return None, None
+    try:
+        if image_url.startswith(("http://", "https://")):
+            import requests
+            response = requests.get(image_url, timeout=5)
+            response.raise_for_status()
+            return None, io.BytesIO(response.content)
+
+        local_path = resolve_image_path_for_export(image_url)
+        if local_path:
+            return str(local_path), None
+
+        if os.path.isabs(image_url) and os.path.isfile(image_url):
+            return image_url, None
+
+        rel_path = str(image_url).lstrip("/")
+        abs_path = os.path.join(os.getcwd(), rel_path)
+        if os.path.isfile(abs_path):
+            return abs_path, None
+
+        logger.warning("Export logo not found on disk: %s", image_url)
+    except Exception as exc:
+        logger.warning("Failed to resolve export logo %s: %s", image_url, exc)
+    return None, None
+
+
+def _load_export_logo_image(image_url: str):
+    """Load a logo image for PDF export."""
+    path, buffer = _resolve_export_logo_source(image_url)
+    if buffer:
+        return RLImage(buffer)
+    if path:
+        return RLImage(path)
+    return None
+
 _META_EMPTY = "—"
 
 
@@ -57,6 +98,57 @@ def _show_weights(content: dict, section_key: str) -> bool:
     return True
 
 
+def _parse_python_dict_str(val: str) -> dict | None:
+    if not (val.startswith("{") and val.endswith("}")):
+        return None
+    try:
+        import ast
+        parsed = ast.literal_eval(val)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return None
+
+
+def _normalize_list_item_text(item) -> str:
+    """Convert list entries (including Saba Title/Definition dicts) to display text."""
+    if isinstance(item, str):
+        stripped = item.strip()
+        parsed = _parse_python_dict_str(stripped)
+        if parsed:
+            return _normalize_list_item_text(parsed)
+        return stripped
+
+    if isinstance(item, dict):
+        point = item.get("point") or item.get("text") or item.get("title")
+        if point:
+            return str(point).strip()
+
+        title = (
+            item.get("Title") or item.get("title") or item.get("name") or item.get("Name")
+        )
+        definition = (
+            item.get("Definition") or item.get("definition")
+            or item.get("description") or item.get("Description")
+        )
+        if title and definition:
+            return f"{str(title).strip()}: {str(definition).strip()}"
+        if title:
+            return str(title).strip()
+        if definition:
+            return str(definition).strip()
+
+        parts: list[str] = []
+        for key, val in item.items():
+            if key in {"weight", "edited_by_color"} or val in (None, ""):
+                continue
+            parts.append(f"{key}: {val}")
+        return " | ".join(parts)
+
+    return str(item).strip()
+
+
 def _is_weighted_list(value) -> bool:
     """Check if value is a weighted list (array of objects with point/weight fields)."""
     if not isinstance(value, list):
@@ -65,6 +157,8 @@ def _is_weighted_list(value) -> bool:
         return False
     # Check if first item has point/weight structure
     first_item = value[0]
+    if isinstance(first_item, str):
+        first_item = _parse_python_dict_str(first_item.strip()) or first_item
     if isinstance(first_item, dict):
         return any(k in first_item for k in ("point", "text", "title"))
     return False
@@ -312,17 +406,19 @@ class PDFGenerator:
         if isinstance(value, list):
             points = []
             for item in value:
-                if isinstance(item, dict):
-                    point = str(item.get("point") or item.get("text") or item.get("title") or "").strip()
+                if isinstance(item, dict) or isinstance(item, str):
+                    point = _normalize_list_item_text(item)
                     point = PDFGenerator._safe_text(point)
-                    try:
-                        weight = int(item.get("weight"))
-                    except (TypeError, ValueError):
-                        weight = None
+                    weight = None
+                    if isinstance(item, dict):
+                        try:
+                            weight = int(item.get("weight"))
+                        except (TypeError, ValueError):
+                            weight = None
                     if point:
                         points.append({"point": point, "weight": weight})
                 else:
-                    point = str(item).strip()
+                    point = _normalize_list_item_text(item)
                     point = PDFGenerator._safe_text(point)
                     if point:
                         points.append({"point": point, "weight": None})
@@ -424,19 +520,10 @@ class PDFGenerator:
             for image_url in image_urls:
                 if not image_url:
                     continue
+                logo = _load_export_logo_image(image_url)
+                if not logo:
+                    continue
                 try:
-                    if isinstance(image_url, str) and (image_url.startswith("http://") or image_url.startswith("https://")):
-                        import requests
-                        response = requests.get(image_url, timeout=5)
-                        response.raise_for_status()
-                        logo = RLImage(io.BytesIO(response.content))
-                    else:
-                        rel_path = str(image_url or "").lstrip("/")
-                        abs_path = os.path.join(os.getcwd(), rel_path)
-                        if os.path.isfile(abs_path):
-                            logo = RLImage(abs_path)
-                        else:
-                            continue
                     fixed_w = 380
                     ratio = fixed_w / logo.drawWidth
                     logo.drawWidth = fixed_w
@@ -445,8 +532,7 @@ class PDFGenerator:
                     elements.append(logo)
                     elements.append(Spacer(1, 10))
                 except Exception as e:
-                    logger.debug(f"Failed to load image {image_url}: {str(e)}")
-                    pass
+                    logger.warning("Failed to render export logo %s: %s", image_url, e)
 
         elements.append(Paragraph(self._safe_text(jd_title), job_title_style))
 
@@ -590,8 +676,11 @@ class PDFGenerator:
             elif isinstance(value, list):
                 # Plain list (not weighted) - render as bullet points
                 add_card_header(title, colors.HexColor(color_hex))
-                # Convert plain list to weighted points without weights
-                plain_points = [{"point": str(item).strip(), "weight": None} for item in value if str(item).strip()]
+                plain_points = [
+                    {"point": _normalize_list_item_text(item), "weight": None}
+                    for item in value
+                    if _normalize_list_item_text(item)
+                ]
                 add_weighted_content(plain_points, False)  # Never show weights for plain lists
             else:
                 # Text section (string or other scalar)
@@ -975,26 +1064,19 @@ class PDFGenerator:
             for image_url in image_urls:
                 if not image_url:
                     continue
+                path, buffer = _resolve_export_logo_source(image_url)
+                if not path and not buffer:
+                    continue
                 try:
-                    if isinstance(image_url, str) and (image_url.startswith("http://") or image_url.startswith("https://")):
-                        import requests
-                        response = requests.get(image_url, timeout=5)
-                        response.raise_for_status()
-                        logo_para = doc.add_paragraph()
-                        logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        logo_para.add_run().add_picture(io.BytesIO(response.content), width=Inches(6.25))
-                        doc.add_paragraph()
+                    logo_para = doc.add_paragraph()
+                    logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    if path:
+                        logo_para.add_run().add_picture(path, width=Inches(6.25))
                     else:
-                        rel_path = str(image_url or "").lstrip("/")
-                        abs_path = os.path.join(os.getcwd(), rel_path)
-                        if os.path.isfile(abs_path):
-                            logo_para = doc.add_paragraph()
-                            logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            logo_para.add_run().add_picture(abs_path, width=Inches(6.25))
-                            doc.add_paragraph()
+                        logo_para.add_run().add_picture(buffer, width=Inches(6.25))
+                    doc.add_paragraph()
                 except Exception as e:
-                    logger.debug(f"Failed to load image {image_url}: {str(e)}")
-                    pass
+                    logger.warning("Failed to render Word export logo %s: %s", image_url, e)
 
         t = doc.add_paragraph()
         t.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -1165,8 +1247,12 @@ class PDFGenerator:
                 # Weighted list section
                 add_styled_section(title, value, color_hex, key)
             elif isinstance(value, list):
-                # Plain list - convert to weighted points without weights
-                plain_points = [{"point": str(item).strip(), "weight": None} for item in value if str(item).strip()]
+                # Plain list - convert to readable bullet points
+                plain_points = [
+                    {"point": _normalize_list_item_text(item), "weight": None}
+                    for item in value
+                    if _normalize_list_item_text(item)
+                ]
                 add_styled_section(title, plain_points, color_hex, key)
             else:
                 # Text section

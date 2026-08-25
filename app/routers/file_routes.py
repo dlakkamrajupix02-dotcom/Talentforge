@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
+from app.core.file_storage import media_type_for_path, UPLOADS_ROOT
 from app.services.dependencies import get_current_regular_user, get_current_candidate
 from app.models.models import User, CandidateUser
 from app.core.logging import get_logger
@@ -14,27 +15,26 @@ from app.core.logging import get_logger
 logger = get_logger()
 router = APIRouter(prefix="/private", tags=["Secure File Access"])
 
-# Private uploads directory
-UPLOADS_ROOT = Path("private/uploads")
-
 
 def _validate_path(file_path: str) -> Path:
     """Validate file path to prevent directory traversal attacks."""
     try:
-        # Remove leading slash and construct full path
         relative_path = file_path.lstrip("/")
+        if relative_path.startswith("private/uploads/"):
+            relative_path = relative_path[len("private/uploads/"):]
         full_path = UPLOADS_ROOT / relative_path.replace("private/uploads/", "")
-        
-        # Resolve to absolute path and verify it's within uploads root
+
         resolved_path = full_path.resolve()
         if not str(resolved_path).startswith(str(UPLOADS_ROOT.resolve())):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-        
+
         if not resolved_path.exists() or not resolved_path.is_file():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
-        
+
         return resolved_path
-    except Exception as e:
+    except HTTPException:
+        raise
+    except Exception:
         logger.warning("Invalid file path access attempt: %s", file_path)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file path")
 
@@ -70,24 +70,24 @@ async def serve_digital_signature(filename: str,current_candidate: CandidateUser
 
 
 @router.get("/uploads/org_images/{filename}")
+@router.get("/uploads/organizations/{filename}")
 async def serve_org_image(filename: str,current_user: User = Depends(get_current_regular_user),db: AsyncSession = Depends(get_db)):
     """
-    Serve organization image files with user authentication.
+    Serve organization profile image files with user authentication.
     Users can only access images from their own organization.
     """
     try:
-        file_path = _validate_path(f"/private/uploads/org_images/{filename}")
-        
-        # Security: Verify the organization image belongs to user's organization
+        file_path = _validate_path(f"/private/uploads/organizations/{filename}")
+
         from app.repository import organization_repository as org_repo
         org = await org_repo.get_organization_by_id(db, current_user.org_id)
         if not org or not org.image_url or filename not in org.image_url:
             logger.warning("User %s attempted to access unauthorized org image: %s", current_user.id, filename)
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-        
+
         logger.info("Serving org image for user %s from org %s", current_user.id, current_user.org_id)
-        return FileResponse(file_path)
-        
+        return FileResponse(file_path, media_type=media_type_for_path(file_path))
+
     except HTTPException:
         raise
     except Exception as e:
@@ -96,13 +96,14 @@ async def serve_org_image(filename: str,current_user: User = Depends(get_current
 
 
 @router.get("/uploads/jd_images/{filename}")
+@router.get("/uploads/job_descriptions/{filename}")
 async def serve_jd_image(filename: str,current_user: User = Depends(get_current_regular_user),db: AsyncSession = Depends(get_db)):
     """
     Serve job description image files with user authentication.
     Users can only access JD images from their own organization.
     """
     try:
-        file_path = _validate_path(f"/private/uploads/jd_images/{filename}")
+        file_path = _validate_path(f"/private/uploads/job_descriptions/{filename}")
         
         # Security: Verify the JD belongs to user's organization
         from app.repository import jd_repository as jd_repo
@@ -115,7 +116,7 @@ async def serve_jd_image(filename: str,current_user: User = Depends(get_current_
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
         
         logger.info("Serving JD image for user %s from org %s", current_user.id, current_user.org_id)
-        return FileResponse(file_path)
+        return FileResponse(file_path, media_type=media_type_for_path(file_path))
         
     except HTTPException:
         raise

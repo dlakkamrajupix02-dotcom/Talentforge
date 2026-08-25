@@ -1,8 +1,9 @@
 from uuid import UUID
 from typing import Optional
+from pathlib import Path
 from fastapi import UploadFile, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.file_storage import save_image_to_disk, delete_image_from_disk
+from app.core.file_storage import save_image_to_disk, delete_image_from_disk, resolve_upload_file_path, media_type_for_path
 from app.models.models import User
 from app.services.dependencies import require_admin
 from app.repository import org_image_repository as img_repo
@@ -40,5 +41,37 @@ class OrgImageService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
         delete_image_from_disk(image.image_url)
         await img_repo.delete_org_image(db, image)
+
+    @staticmethod
+    async def get_org_image_file_path(
+        db: AsyncSession,
+        image_id: UUID,
+        current_user: User,
+    ) -> Path:
+        if not current_user.org_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User has no company assigned",
+            )
+        image = await img_repo.get_org_image_by_id(
+            db, image_id=image_id, org_id=current_user.org_id
+        )
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Image not found",
+            )
+        try:
+            return resolve_upload_file_path(image.image_url)
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Image file not found on disk",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
 
 org_image_service = OrgImageService()

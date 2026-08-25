@@ -10,7 +10,9 @@ ALLOWED_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg"}
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MIN_IMAGE_BYTES = 10
 # Security: Store sensitive files in private directory (not publicly accessible)
-UPLOADS_ROOT = Path("private/uploads")
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+UPLOADS_ROOT = _PROJECT_ROOT / "private" / "uploads"
+STATIC_UPLOADS_ROOT = _PROJECT_ROOT / "static" / "uploads"
 
 def _mime_from_bytes(image_bytes: bytes) -> str | None:
     if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -57,6 +59,47 @@ async def save_image_to_disk(*, image: UploadFile | None, kind: str) -> str | No
     # Security: Return path relative to private uploads (served via authenticated endpoint)
     return f"/private/uploads/{kind}/{filename}"
 
+
+def resolve_upload_file_path(image_url: str) -> Path:
+    """Resolve a stored image URL to an absolute on-disk path."""
+    if not image_url:
+        raise ValueError("Missing image URL")
+    if image_url.startswith("/static/uploads/"):
+        root = STATIC_UPLOADS_ROOT
+        relative_path = image_url[len("/static/uploads/"):]
+    elif image_url.startswith("/private/uploads/"):
+        root = UPLOADS_ROOT
+        relative_path = image_url[len("/private/uploads/"):]
+    else:
+        raise ValueError(f"Unsupported image URL: {image_url}")
+
+    path = (root / relative_path).resolve()
+    if not path.is_relative_to(root.resolve()):
+        raise ValueError("Invalid image path")
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"Image file not found: {image_url}")
+    return path
+
+
+def resolve_image_path_for_export(image_url: str | None) -> Path | None:
+    """Resolve a stored image URL for PDF/Word export. Returns None if not found locally."""
+    if not image_url:
+        return None
+    try:
+        return resolve_upload_file_path(image_url)
+    except (ValueError, FileNotFoundError):
+        return None
+
+
+def media_type_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        return "image/png"
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    return "application/octet-stream"
+
+
 def delete_image_from_disk(image_url: str | None) -> None:
     """Delete an image file previously saved by save_image_to_disk. Silently ignores errors."""
     if not image_url:
@@ -65,15 +108,15 @@ def delete_image_from_disk(image_url: str | None) -> None:
     if not (image_url.startswith("/static/uploads/") or image_url.startswith("/private/uploads/")):
         return
     try:
-        # Extract the path after /static/ or /private/
         if image_url.startswith("/static/uploads/"):
             relative_path = image_url[len("/static/uploads/"):]
+            path = STATIC_UPLOADS_ROOT / relative_path
         else:
             relative_path = image_url[len("/private/uploads/"):]
-        
-        path = UPLOADS_ROOT / relative_path
-        # Guard against path traversal — ensure the resolved path is within uploads root
-        if not path.resolve().is_relative_to(UPLOADS_ROOT.resolve()):
+            path = UPLOADS_ROOT / relative_path
+
+        root = STATIC_UPLOADS_ROOT if image_url.startswith("/static/uploads/") else UPLOADS_ROOT
+        if not path.resolve().is_relative_to(root.resolve()):
             return
         if path.exists():
             path.unlink()
@@ -90,10 +133,12 @@ async def get_image_base64_from_disk(image_url: str | None) -> str | None:
     try:
         if image_url.startswith("/static/uploads/"):
             relative_path = image_url[len("/static/uploads/"):]
+            root = STATIC_UPLOADS_ROOT
         else:
             relative_path = image_url[len("/private/uploads/"):]
-        path = UPLOADS_ROOT / relative_path
-        if not path.resolve().is_relative_to(UPLOADS_ROOT.resolve()):
+            root = UPLOADS_ROOT
+        path = root / relative_path
+        if not path.resolve().is_relative_to(root.resolve()):
             return None
         if path.exists():
             import base64

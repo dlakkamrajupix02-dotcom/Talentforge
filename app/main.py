@@ -1,12 +1,12 @@
 import sys
 from pathlib import Path
 
-# Ensure project root is in sys.path for cloud CLI runners
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-
+import sys
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.exceptions import RequestValidationError
@@ -236,8 +236,13 @@ async def lifespan(app: FastAPI):
     setup_logging(level=settings.log_level)
     logger.info("Starting up — initializing database …")
     from pathlib import Path
-    Path("static/uploads/organizations").mkdir(parents=True, exist_ok=True)
-    Path("static/uploads/job_descriptions").mkdir(parents=True, exist_ok=True)
+    from app.core.file_storage import UPLOADS_ROOT, STATIC_UPLOADS_ROOT
+    STATIC_UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
+    (STATIC_UPLOADS_ROOT / "organizations").mkdir(parents=True, exist_ok=True)
+    (STATIC_UPLOADS_ROOT / "job_descriptions").mkdir(parents=True, exist_ok=True)
+    UPLOADS_ROOT.mkdir(parents=True, exist_ok=True)
+    (UPLOADS_ROOT / "organizations").mkdir(parents=True, exist_ok=True)
+    (UPLOADS_ROOT / "job_descriptions").mkdir(parents=True, exist_ok=True)
     try:
         await init_db()
         logger.info("Database initialized successfully")
@@ -298,14 +303,9 @@ else:
 
 
 
-
-
 app.add_middleware(CORSMiddleware,allow_origins=_cors_origins,allow_credentials=_cors_credentials,allow_methods=["*"],allow_headers=["*"])
 
-# Add request size limit middleware
 app.add_middleware(RequestSizeLimitMiddleware)
-
-# Add request ID middleware for tracing
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
@@ -337,7 +337,6 @@ app.include_router(extra_router)
 app.include_router(skill_taxonomy_router)
 app.include_router(org_image_router)
 app.include_router(analytics_router)
-
 app.include_router(csod_router)
 app.include_router(foundation_pipeline_router)
 app.include_router(bulk_pipeline_router)
@@ -376,12 +375,7 @@ async def get_static_file(filepath: str, request: Request, db: AsyncSession = De
         raise HTTPException(status_code=401, detail="Invalid token payload")
 
     if session_id:
-        await _validate_staff_session(
-            db,
-            token_credentials=token,
-            user_id=str(user_id),
-            session_id=str(session_id),
-        )
+        await _validate_staff_session(db,token_credentials=token,user_id=str(user_id),session_id=str(session_id))
 
     try:
         user_uuid = UUID(str(user_id))

@@ -15,11 +15,7 @@ class AgentChatRequest(BaseModel):
     model_name: Optional[str] = Field(default=None, description="Selected AI model name")
 
 @router.post("/chat", response_model=Dict[str, Any])
-async def super_admin_agent_chat(
-    payload: AgentChatRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user = Depends(get_current_super_admin)
-):
+async def super_admin_agent_chat(payload: AgentChatRequest,db: AsyncSession = Depends(get_db),current_user = Depends(get_current_super_admin)):
     """
     Execute Super Admin AI intelligence query: converts natural language to optimized PostgreSQL SQL,
     executes safe read-only query, and returns analytical narrative, dynamic chart configurations, and tabular data.
@@ -28,25 +24,15 @@ async def super_admin_agent_chat(
     if model_id and model_id in LEXY_TO_PROVIDER:
         model_id = LEXY_TO_PROVIDER[model_id]
 
-    result = await super_admin_agent_service.generate_sql_and_analysis(
-        db=db,
-        user_prompt=payload.prompt,
-        chat_history=payload.chat_history,
-        model_name=model_id
-    )
+    result = await super_admin_agent_service.generate_sql_and_analysis(db=db,user_prompt=payload.prompt,chat_history=payload.chat_history,model_name=model_id)
 
     if not result.get("success"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=result.get("error") or result.get("message") or "Query processing failed."
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,detail=result.get("error") or result.get("message") or "Query processing failed.")
 
     return result
 
 @router.get("/suggestions", response_model=List[Dict[str, Any]])
-async def get_agent_suggestions(
-    current_user = Depends(get_current_super_admin)
-):
+async def get_agent_suggestions(current_user = Depends(get_current_super_admin)):
     """Get curated prompt suggestions and analytical intelligence cards for Super Admin."""
     return super_admin_agent_service.get_quick_suggestions()
 
@@ -57,32 +43,19 @@ class ExportExcelRequest(BaseModel):
     title: Optional[str] = Field(default="Analytics Export", description="Sheet title")
 
 @router.post("/export-excel")
-async def super_admin_agent_export_excel(
-    payload: ExportExcelRequest,
-    current_user = Depends(get_current_super_admin)
-):
+async def super_admin_agent_export_excel(payload: ExportExcelRequest,current_user = Depends(get_current_super_admin)):
     """
     Export analytics or SQL query results directly to a downloadable Excel (.xlsx) file.
     """
     from fastapi.responses import Response
 
-    excel_bytes = super_admin_agent_service.export_data_to_excel_bytes(
-        data=payload.data,
-        columns=payload.columns,
-        title=payload.title
-    )
+    excel_bytes = super_admin_agent_service.export_data_to_excel_bytes(data=payload.data,columns=payload.columns,title=payload.title)
     
     filename = payload.filename if payload.filename.endswith(".xlsx") else f"{payload.filename}.xlsx"
-    return Response(
-        content=excel_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-    )
+    return Response(content=excel_bytes,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 @router.get("/models", response_model=List[Dict[str, str]])
-async def get_available_models(
-    current_user = Depends(get_current_super_admin)
-):
+async def get_available_models(current_user = Depends(get_current_super_admin)):
     """List available LLM models for SQL reasoning and analytics."""
     raw_models = getattr(settings, 'ai_available_models', 'codestral-latest,mistral-large-latest,mistral-medium-latest')
     model_list = [m.strip() for m in raw_models.split(',') if m.strip()]

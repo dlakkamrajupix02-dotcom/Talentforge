@@ -698,7 +698,20 @@ def _extract_points(value: Any) -> List[str]:
                 if parsed:
                     item = parsed
             if isinstance(item, dict):
-                text = str(item.get("point") or item.get("text") or item.get("title") or "").strip()
+                title = (
+                    item.get("Title") or item.get("title")
+                    or item.get("name") or item.get("Name")
+                )
+                definition = (
+                    item.get("Definition") or item.get("definition")
+                    or item.get("description") or item.get("Description")
+                )
+                if title and definition:
+                    text = f"{str(title).strip()}: {str(definition).strip()}"
+                else:
+                    text = str(
+                        item.get("point") or item.get("text") or item.get("title") or title or definition or ""
+                    ).strip()
             else:
                 text = str(item).strip()
             if text:
@@ -975,21 +988,62 @@ async def _clear_user_jds_cache(current_user: User):
     await cache_service.clear_cache_by_pattern(f"query:*{str(current_user.org_id)}*")
 
 
+async def _resolve_logo_path_for_export(
+    db: AsyncSession,
+    image_url: Optional[str],
+    org_id: Optional[UUID],
+) -> Optional[str]:
+    """Resolve stored/API logo URLs to a local absolute path for PDF/Word export."""
+    from app.core.file_storage import resolve_image_path_for_export
+
+    if not image_url:
+        return None
+
+    resolved_url = image_url
+    api_match = re.search(
+        r"/organizations/images/([0-9a-f-]{36})/(?:file|download)?",
+        image_url,
+        re.I,
+    )
+    if api_match and org_id:
+        image_id = UUID(api_match.group(1))
+        library_image = await org_img_repo.get_org_image_by_id(db, image_id=image_id, org_id=org_id)
+        if library_image and library_image.image_url:
+            resolved_url = library_image.image_url
+
+    local_path = resolve_image_path_for_export(resolved_url)
+    if local_path:
+        return str(local_path)
+
+    # Only pass through external HTTP URLs (not our authenticated API routes).
+    if resolved_url.startswith(("http://", "https://")):
+        if "/organizations/images/" in resolved_url:
+            logger.warning("Export logo unavailable — authenticated API URL cannot be fetched: %s", resolved_url)
+            return None
+        return resolved_url
+
+    logger.warning("Export logo file not found for URL: %s", resolved_url)
+    return None
+
+
 async def _get_jd_logo_url(db: AsyncSession, jd: JobDescription, org_id: UUID) -> Optional[str]:
     """Resolves logo URL with 3-layer priority: JD -> Org Primary -> Org Library."""
+    raw_url: Optional[str] = None
     # 1. Check JD specific image
     if jd.image_url:
-        return jd.image_url
-    # 2. Check Organization primary logo
-    org = await org_repo.get_organization_by_id(db, org_id)
-    if org and org.image_url:
-        return org.image_url
+        raw_url = jd.image_url
+    else:
+        # 2. Check Organization primary logo
+        org = await org_repo.get_organization_by_id(db, org_id)
+        if org and org.image_url:
+            raw_url = org.image_url
+        else:
+            # 3. Check Org Image library (most recent)
+            org_images = await org_img_repo.list_org_images(db, org_id)
+            if org_images:
+                raw_url = org_images[0].get("image_url")
 
-    # 3. Check Org Image library (most recent)
-    org_images = await org_img_repo.list_org_images(db, org_id)
-    if org_images:
-        return org_images[0].get("image_url") # Already ordered by desc created_at 
-    return None
+    return await _resolve_logo_path_for_export(db, raw_url, org_id)
 
 
 def _jd_to_export_payload(jd: JobDescription, image_url: Optional[str]) -> dict:
